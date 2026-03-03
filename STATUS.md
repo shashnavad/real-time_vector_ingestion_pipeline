@@ -6,13 +6,17 @@ needs to be done.
 Implemented:
 - Read and parsed the project checklist (`Real-Time Vector Ingestion Pipeline.md`).
 - Chosen free-tier-first stack (Python, FastAPI, sentence-transformers, Chroma/FAISS fallback).
-- Project scaffold with core modules:
-  - `app/main.py` - FastAPI endpoints (`/ingest`, `/query`, `/health`).
+ - Project scaffold with core modules:
+  - `app/main.py` - FastAPI endpoints (`/ingest`, `/query`, `/health`). The `/ingest`
+    endpoint now produces to a Kafka topic (`raw-documents`).
   - `app/embeddings.py` - Embedding wrapper with sentence-transformers and deterministic fallback.
   - `app/vector_store.py` - Vector store wrapper (Chroma backend when available, in-memory fallback).
-  - `app/queue.py` - Queue wrapper supporting Redis+RQ with an inline fallback for local dev.
-  - `app/rq_worker.py` - RQ worker function used by enqueued jobs.
-  - `Dockerfile`, `docker-compose.yml` for local durable setup (Redis + RQ worker).
+  - `app/queue.py` - Messaging wrapper that prefers Kafka (via `KAFKA_BOOTSTRAP_SERVERS`),
+    falls back to Redis+RQ, and otherwise executes inline for local dev/tests.
+  - `app/rq_worker.py` - RQ worker function used by enqueued jobs (fallback path).
+  - `app/streaming.py` - Spark Structured Streaming job (reads Kafka `raw-documents`, computes
+    embeddings, sinks to Qdrant or local store).
+  - `Dockerfile`, `docker-compose.yml` for local durable setup (Redpanda + Redis + web + worker).
 - Tests and CI:
   - Unit tests under `tests/` cover embeddings, vector store, ingest and query flows.
   - GitHub Actions workflow `/.github/workflows/ci.yml` runs tests on push/PR. The latest CI run (after fixing the Python matrix) completed successfully: https://github.com/shashnavad/real-time_vector_ingestion_pipeline/actions/runs/22611192680

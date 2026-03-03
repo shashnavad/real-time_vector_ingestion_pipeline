@@ -62,29 +62,60 @@ Next steps implemented in repo
 - Vector store wrapper with Chroma fallback to in-memory store
 - Simple test harness and status file
 
-Running with Redis + RQ (durable queue) using Docker Compose
+Running with Redpanda (Kafka) + Spark streaming (recommended)
 
-If you want durable background processing with Redis and RQ, Docker Compose is included.
-It spins up Redis, the web app, and an RQ worker that will process enqueued jobs.
+The project now uses a streaming-first architecture: the `/ingest` endpoint
+produces JSON messages onto a Kafka topic (`raw-documents`). A separate Spark
+Structured Streaming job reads that topic, computes embeddings (using the same
+embedding helper), and sinks vectors into Qdrant (if configured) or the local
+vector store as a fallback.
 
-1. Build and start services:
+Docker Compose includes Redpanda (a lightweight Kafka-compatible broker), Redis
+and the web/worker images. To run the streaming stack locally:
+
+1. Build and start services (Redpanda + Redis + web + worker):
 
 ```bash
 docker compose build --pull
 docker compose up -d
 ```
 
-2. The web API will be available at http://localhost:8000. When `REDIS_URL` is set
-	(Docker Compose sets it for you), ingestion requests are enqueued and processed by the RQ worker.
+2. The web API will be available at http://localhost:8000. By default the app
+	will attempt to produce to `redpanda:9092` (configured via
+	`KAFKA_BOOTSTRAP_SERVERS`).
 
-3. To view worker logs:
+3. Start the Spark streaming job to consume `raw-documents` and sink vectors.
+	You can run the stream inside the web image (it contains the Python deps):
+
+```bash
+# run streaming job in the web container
+docker compose run --rm web python -m app.streaming
+```
+
+	Alternatively run it locally after installing `pyspark` and other optional
+	deps:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python -m app.streaming
+```
+
+4. (Optional) View worker logs (the RQ worker is still present as a fallback):
 
 ```bash
 docker compose logs -f worker
 ```
 
-4. To stop and remove the services:
+5. Tear down the services:
 
 ```bash
 docker compose down
 ```
+
+Notes about the RQ fallback
+- The code keeps a Redis+RQ worker as a fallback processing path when Kafka is
+  not available. However the primary, recommended flow is stream-based using
+  Kafka + Spark so you can scale and batch embeddings independently of the
+  ingestion API.
