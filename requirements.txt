@@ -6,3 +6,6 @@ pytest==7.4.0
 httpx==0.24.1
 redis==4.6.0
 rq==1.2.0
+kafka-python==2.0.2
+pyspark==3.4.1
+qdrant-client==1.9.2

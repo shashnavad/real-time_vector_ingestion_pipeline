@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 
 from .embeddings import default_embeddings
 from .vector_store import default_vector_store
-from .queue import default_queue
+from .queue import default_messenger
 
 
 class IngestRequest(BaseModel):
@@ -31,12 +31,15 @@ def ingest(req: IngestRequest):
     if not req.text or not req.text.strip():
         raise HTTPException(status_code=400, detail="text must be non-empty")
     try:
-        # If a Redis-backed queue is available (REDIS_URL), enqueue the processing job
-        if default_queue.enabled:
-            default_queue.enqueue("app.rq_worker.process_document", req.id, req.text, req.metadata)
-            return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={"status": "queued", "id": req.id})
+        # Produce message into Kafka topic 'raw-documents' when available.
+        payload = {"id": req.id, "text": req.text, "metadata": req.metadata}
+        prod_res = default_messenger.produce("raw-documents", payload)
 
-        # Otherwise process inline for local dev / tests
+        # If Kafka/RQ was used the produce call will return a non-dict (send result or job).
+        if prod_res is not None and not isinstance(prod_res, dict):
+            return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={"status": "produced", "id": req.id})
+
+        # Inline fallback: process synchronously
         vectors = default_embeddings.encode([req.text])
         vector = vectors[0]
         default_vector_store.upsert(req.id, vector, req.metadata)

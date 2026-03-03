@@ -1,6 +1,15 @@
 version: "3.8"
 
 services:
+  # Redpanda is a lightweight Kafka-compatible broker (no Zookeeper required)
+  redpanda:
+    image: vectorized/redpanda:latest
+    command: ["redpanda", "start", "--overprovisioned", "--smp", "1", "--memory", "1G", "--reserve-memory", "0M", "--node-id", "0"]
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "rpk cluster info || exit 1"]
+
   redis:
     image: redis:7
     ports:
@@ -12,13 +21,17 @@ services:
       - "8000:8000"
     environment:
       - REDIS_URL=redis://redis:6379
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda:9092
     depends_on:
       - redis
+      - redpanda
 
   worker:
     build: .
     command: rq worker -u redis://redis:6379 default
     environment:
       - REDIS_URL=redis://redis:6379
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda:9092
     depends_on:
       - redis
+      - redpanda
