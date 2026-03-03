@@ -48,3 +48,29 @@ def ingest(req: IngestRequest):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+class QueryRequest(BaseModel):
+    text: Optional[str] = Field(None, description="Text to query")
+    top_k: int = Field(5, description="Number of nearest neighbors to return")
+
+
+@app.post("/query")
+def query(req: QueryRequest):
+    """Query the vector store by text. Returns top_k nearest documents.
+
+    If sentence-transformers is installed this will compute an embedding for the
+    query text; otherwise it uses the deterministic fallback embedding.
+    """
+    if not req.text or not req.text.strip():
+        raise HTTPException(status_code=400, detail="text must be non-empty")
+    try:
+        qvec = default_embeddings.encode([req.text])[0]
+        results = default_vector_store.query(qvec, top_k=req.top_k)
+        # results are tuples (id, score, metadata)
+        out = []
+        for rid, score, metadata in results:
+            out.append({"id": rid, "score": float(score), "metadata": metadata})
+        return {"results": out}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
