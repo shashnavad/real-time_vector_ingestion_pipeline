@@ -1,0 +1,10 @@
+__pycache__/
+.venv/
+venv/
+*.pyc
+/.idea/
+.DS_Store
+data/
+chroma_db/
+*.sqlite
+env/
