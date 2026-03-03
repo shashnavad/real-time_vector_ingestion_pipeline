@@ -18,7 +18,6 @@ from .queue import default_messenger
 import hashlib
 import time
 import json
-import redis
 
 
 class IngestRequest(BaseModel):
@@ -68,7 +67,8 @@ def ingest(req: IngestRequest):
         try:
             redis_url = os.environ.get("REDIS_URL")
             if redis_url:
-                r = redis.from_url(redis_url)
+                import redis as _redis
+                r = _redis.from_url(redis_url)
                 now = int(time.time() * 1000)
                 latency = now - ingest_ts
                 r.incr("metrics:count", 1)
@@ -106,7 +106,8 @@ def metrics():
         redis_url = os.environ.get("REDIS_URL")
         if not redis_url:
             return {"count": 0, "avg_latency_ms": None, "last_latency_ms": None}
-        r = redis.from_url(redis_url)
+        import redis as _redis
+        r = _redis.from_url(redis_url)
         count = int(r.get("metrics:count") or 0)
         total = float(r.get("metrics:total_latency") or 0)
         last = r.get("metrics:last_latency")
