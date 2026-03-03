@@ -47,3 +47,30 @@ Next steps implemented in repo
 - Embeddings wrapper with fallback
 - Vector store wrapper with Chroma fallback to in-memory store
 - Simple test harness and status file
+
+Running with Redis + RQ (durable queue) using Docker Compose
+
+If you want durable background processing with Redis and RQ, Docker Compose is included.
+It spins up Redis, the web app, and an RQ worker that will process enqueued jobs.
+
+1. Build and start services:
+
+```bash
+docker compose build --pull
+docker compose up -d
+```
+
+2. The web API will be available at http://localhost:8000. When `REDIS_URL` is set
+	(Docker Compose sets it for you), ingestion requests are enqueued and processed by the RQ worker.
+
+3. To view worker logs:
+
+```bash
+docker compose logs -f worker
+```
+
+4. To stop and remove the services:
+
+```bash
+docker compose down
+```
