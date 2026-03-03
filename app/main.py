@@ -15,10 +15,15 @@ from typing import Any, Dict, Optional
 from .embeddings import default_embeddings
 from .vector_store import default_vector_store
 from .queue import default_messenger
+import hashlib
+import time
+import json
+import redis
 
 
 class IngestRequest(BaseModel):
-    id: str = Field(..., description="Unique document identifier")
+    # id is optional from the caller; we'll compute a deterministic id if omitted
+    id: Optional[str] = Field(None, description="Unique document identifier (optional)")
     text: str = Field(..., description="Text to embed")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Optional metadata")
 
@@ -31,19 +36,57 @@ def ingest(req: IngestRequest):
     if not req.text or not req.text.strip():
         raise HTTPException(status_code=400, detail="text must be non-empty")
     try:
-        # Produce message into Kafka topic 'raw-documents' when available.
-        payload = {"id": req.id, "text": req.text, "metadata": req.metadata}
+        # Deterministic ID: if client provided an id use it, otherwise compute sha256 of text+metadata
+        meta_json = json.dumps(req.metadata, sort_keys=True, default=str) if req.metadata else ""
+        base = (req.id or "") + "|" + req.text + "|" + meta_json
+        det_id = hashlib.sha256(base.encode("utf-8")).hexdigest()
+
+        # Sequence/version: high-precision timestamp in milliseconds
+        ingest_ts = int(time.time() * 1000)
+
+        # Compose the canonical payload (source-of-truth schema)
+        payload = {
+            "id": det_id,
+            "original_id": req.id,
+            "text": req.text,
+            "metadata": req.metadata or {},
+            "version": ingest_ts,
+            "ingest_ts": ingest_ts,
+        }
         prod_res = default_messenger.produce("raw-documents", payload)
 
         # If Kafka/RQ was used the produce call will return a non-dict (send result or job).
         if prod_res is not None and not isinstance(prod_res, dict):
-            return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={"status": "produced", "id": req.id})
+            return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={"status": "produced", "id": det_id})
 
-        # Inline fallback: process synchronously
+        # Inline fallback: process synchronously (also record metrics if Redis available)
         vectors = default_embeddings.encode([req.text])
         vector = vectors[0]
-        default_vector_store.upsert(req.id, vector, req.metadata)
-        return {"status": "ok", "id": req.id}
+        default_vector_store.upsert(det_id, vector, req.metadata)
+
+        # record metric to Redis if configured
+        try:
+            redis_url = os.environ.get("REDIS_URL")
+            if redis_url:
+                r = redis.from_url(redis_url)
+                now = int(time.time() * 1000)
+                latency = now - ingest_ts
+                r.incr("metrics:count", 1)
+                # INCRBYFLOAT may not exist in some clients; use incrbyfloat if available
+                try:
+                    r.incrbyfloat("metrics:total_latency", float(latency))
+                except Exception:
+                    # fallback: get existing total and set
+                    try:
+                        prev = float(r.get("metrics:total_latency") or 0)
+                        r.set("metrics:total_latency", prev + float(latency))
+                    except Exception:
+                        pass
+                r.set("metrics:last_latency", latency)
+        except Exception:
+            pass
+
+        return {"status": "ok", "id": det_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -51,6 +94,27 @@ def ingest(req: IngestRequest):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+def metrics():
+    """Return simple ingestion metrics (avg processing latency in ms and count).
+
+    Metrics are aggregated in Redis by the streaming job or inline fallback.
+    """
+    try:
+        redis_url = os.environ.get("REDIS_URL")
+        if not redis_url:
+            return {"count": 0, "avg_latency_ms": None, "last_latency_ms": None}
+        r = redis.from_url(redis_url)
+        count = int(r.get("metrics:count") or 0)
+        total = float(r.get("metrics:total_latency") or 0)
+        last = r.get("metrics:last_latency")
+        last_val = int(last) if last is not None else None
+        avg = (total / count) if count > 0 else None
+        return {"count": count, "avg_latency_ms": avg, "last_latency_ms": last_val}
+    except Exception:
+        return {"count": 0, "avg_latency_ms": None, "last_latency_ms": None}
 
 
 class QueryRequest(BaseModel):
