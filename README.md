@@ -37,6 +37,20 @@ uvicorn app.main:app --reload
 curl -X POST "http://127.0.0.1:8000/ingest" -H "Content-Type: application/json" -d '{"id":"doc1","text":"Hello world","metadata":{"source":"test"}}'
 ```
 
+Querying (nearest neighbors)
+
+After ingesting documents you can query the vector store by text. Example:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/query" -H "Content-Type: application/json" -d '{"text":"Hello world","top_k":5}'
+```
+
+The response format is:
+
+```json
+{ "results": [ { "id": "doc1", "score": 0.98, "metadata": {...} }, ... ] }
+```
+
 Notes
 - The project has safe fallbacks so you don't need to install large ML models to iterate.
 - To enable true embeddings, install `sentence-transformers` (and optionally `chromadb`).
