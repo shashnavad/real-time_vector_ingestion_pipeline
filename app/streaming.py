@@ -19,21 +19,28 @@ def start_stream(kafka_bootstrap_servers: str = None, topic: str = "raw-document
     spark = SparkSession.builder.appName("vector-ingest-stream").getOrCreate()
 
     # Read from Kafka
+    # Configure Kafka source with a cap per trigger to help backpressure handling
     df = (
         spark.readStream.format("kafka")
         .option("kafka.bootstrap.servers", kafka_bootstrap_servers or os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"))
         .option("subscribe", topic)
         .option("startingOffsets", "earliest")
+        .option("maxOffsetsPerTrigger", os.environ.get("SPARK_MAX_OFFSETS_PER_TRIGGER", "1000"))
         .load()
     )
 
     # Assume value is UTF-8 JSON
     df2 = df.selectExpr("CAST(value AS STRING) as value")
 
+    from pyspark.sql.types import LongType
+
     schema = StructType([
         StructField("id", StringType()),
+        StructField("original_id", StringType()),
         StructField("text", StringType()),
         StructField("metadata", MapType(StringType(), StringType())),
+        StructField("version", LongType()),
+        StructField("ingest_ts", LongType()),
     ])
 
     parsed = df2.withColumn("json", from_json(col("value"), schema)).select("json.*")
@@ -49,9 +56,27 @@ def start_stream(kafka_bootstrap_servers: str = None, topic: str = "raw-document
     # We'll use foreachBatch to handle batches and sink using Python client (Qdrant or local)
     def foreach_batch(batch_df, epoch_id):
         rows = batch_df.collect()
-        texts = [r["text"] for r in rows]
-        ids = [r["id"] for r in rows]
-        metadatas = [r["metadata"] for r in rows]
+
+        # Deduplicate within the micro-batch: keep only the latest version per id
+        latest = {}
+        for r in rows:
+            rid = r["id"]
+            ver = r["version"] if r["version"] is not None else 0
+            if rid not in latest or ver >= (latest[rid]["version"] or 0):
+                latest[rid] = {"row": r, "version": ver}
+
+        ids = []
+        texts = []
+        metadatas = []
+        versions = []
+        ingest_ts_list = []
+        for rid, info in latest.items():
+            row = info["row"]
+            ids.append(row["id"])
+            texts.append(row["text"])
+            metadatas.append(row["metadata"])
+            versions.append(row["version"])
+            ingest_ts_list.append(row["ingest_ts"])    
 
         # compute embeddings in Python using the same helper (batch)
         from app.embeddings import default_embeddings
@@ -75,9 +100,33 @@ def start_stream(kafka_bootstrap_servers: str = None, topic: str = "raw-document
 
                 points = []
                 for _id, vec, meta in zip(ids, vectors, metadatas):
+                    # use deterministic id provided by producer to allow idempotent upserts
                     points.append(PointStruct(id=_id, vector=vec, payload=meta or {}))
 
                 client.upsert(collection_name=collection_name, points=points)
+
+                # record latencies into Redis (if configured)
+                try:
+                    import redis as _redis
+                    redis_url = os.environ.get("REDIS_URL")
+                    if redis_url:
+                        r = _redis.from_url(redis_url)
+                        now_ms = int(__import__("time").time() * 1000)
+                        for ingest_ts in ingest_ts_list:
+                            try:
+                                latency = now_ms - int(ingest_ts or 0)
+                                r.incr("metrics:count", 1)
+                                try:
+                                    r.incrbyfloat("metrics:total_latency", float(latency))
+                                except Exception:
+                                    prev = float(r.get("metrics:total_latency") or 0)
+                                    r.set("metrics:total_latency", prev + float(latency))
+                                r.set("metrics:last_latency", latency)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
                 return
             except Exception:
                 # fall back to local vector store
@@ -89,7 +138,15 @@ def start_stream(kafka_bootstrap_servers: str = None, topic: str = "raw-document
         for _id, vec, meta in zip(ids, vectors, metadatas):
             default_vector_store.upsert(_id, vec, meta)
 
-    query = parsed.writeStream.foreachBatch(foreach_batch).start()
+    # configure trigger interval for low-latency processing and a checkpoint
+    processing_time = os.environ.get("SPARK_PROCESSING_TIME", "200ms")
+    checkpoint = os.environ.get("SPARK_CHECKPOINT_LOCATION", "/tmp/spark_checkpoints")
+    query = (
+        parsed.writeStream.foreachBatch(foreach_batch)
+        .trigger(processingTime=processing_time)
+        .option("checkpointLocation", checkpoint)
+        .start()
+    )
     query.awaitTermination()
 
 
