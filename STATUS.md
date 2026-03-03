@@ -16,6 +16,9 @@ Implemented:
   - `app/rq_worker.py` - RQ worker function used by enqueued jobs (fallback path).
   - `app/streaming.py` - Spark Structured Streaming job (reads Kafka `raw-documents`, computes
     embeddings, sinks to Qdrant or local store).
+  - Qdrant is included in `docker-compose.yml` as the default vector DB for the
+    compose environment; the streaming job will upsert vectors to Qdrant when
+    `QDRANT_URL` is present (set to `http://qdrant:6333` by compose).
   - `Dockerfile`, `docker-compose.yml` for local durable setup (Redpanda + Redis + web + worker).
 - Tests and CI:
   - Unit tests under `tests/` cover embeddings, vector store, ingest and query flows.

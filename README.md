@@ -102,13 +102,28 @@ pip install -r requirements.txt
 python -m app.streaming
 ```
 
-4. (Optional) View worker logs (the RQ worker is still present as a fallback):
+4. Verify Qdrant and streaming sink
+
+If you ran `docker compose up` with the provided compose file, a Qdrant instance
+is available on http://localhost:6333 and the streaming job (when started) will
+upsert vectors into the default collection (or `QDRANT_COLLECTION` if you set
+that environment variable). Example:
+
+```bash
+# list collections
+curl http://localhost:6333/collections
+
+# query a collection (replace <collection>)
+curl http://localhost:6333/collections/<collection>/points/scroll -H 'Content-Type: application/json' -d '{"limit": 5}'
+```
+
+5. (Optional) View worker logs (the RQ worker is still present as a fallback):
 
 ```bash
 docker compose logs -f worker
 ```
 
-5. Tear down the services:
+6. Tear down the services:
 
 ```bash
 docker compose down
@@ -116,6 +131,6 @@ docker compose down
 
 Notes about the RQ fallback
 - The code keeps a Redis+RQ worker as a fallback processing path when Kafka is
-  not available. However the primary, recommended flow is stream-based using
-  Kafka + Spark so you can scale and batch embeddings independently of the
-  ingestion API.
+	not available. However the primary, recommended flow is stream-based using
+	Kafka + Spark + Qdrant so you can scale and batch embeddings independently of the
+	ingestion API.
