@@ -51,6 +51,25 @@ The response format is:
 { "results": [ { "id": "doc1", "score": 0.98, "metadata": {...} }, ... ] }
 ```
 
+Source-of-truth message schema (producer)
+
+The `/ingest` endpoint now produces a canonical JSON message to Kafka topic
+`raw-documents`. Each message uses a deterministic ID and includes a version
+timestamp and ingest timestamp. Example fields:
+
+```json
+{
+	"id": "<deterministic-sha256>",
+	"original_id": "<optional-client-id>",
+	"text": "...",
+	"metadata": { ... },
+	"version": 1670000000000,
+	"ingest_ts": 1670000000000
+}
+```
+
+This enables idempotent upserts in the streaming layer.
+
 Notes
 - The project has safe fallbacks so you don't need to install large ML models to iterate.
 - To enable true embeddings, install `sentence-transformers` (and optionally `chromadb`).

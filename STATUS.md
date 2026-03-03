@@ -15,7 +15,12 @@ Implemented:
     falls back to Redis+RQ, and otherwise executes inline for local dev/tests.
   - `app/rq_worker.py` - RQ worker function used by enqueued jobs (fallback path).
   - `app/streaming.py` - Spark Structured Streaming job (reads Kafka `raw-documents`, computes
-    embeddings, sinks to Qdrant or local store).
+    embeddings, sinks to Qdrant or local store). Streaming improvements:
+    - Configurable `SPARK_PROCESSING_TIME` (default 200ms) and
+      `SPARK_MAX_OFFSETS_PER_TRIGGER` to control backpressure and latency.
+    - Deduplication within micro-batches by `id` + `version` (keep latest per id).
+    - Idempotent upserts to Qdrant using deterministic `id` produced by the API.
+    - Emits simple latency metrics into Redis (keys: `metrics:count`, `metrics:total_latency`, `metrics:last_latency`) so the web API `/metrics` can report average processing latency and ingestion counts.
   - Qdrant is included in `docker-compose.yml` as the default vector DB for the
     compose environment; the streaming job will upsert vectors to Qdrant when
     `QDRANT_URL` is present (set to `http://qdrant:6333` by compose).
