@@ -37,8 +37,14 @@ def ingest(req: IngestRequest):
     try:
         # Deterministic ID: if client provided an id use it, otherwise compute sha256 of text+metadata
         meta_json = json.dumps(req.metadata, sort_keys=True, default=str) if req.metadata else ""
+        # If client provided an explicit id, respect it. Otherwise compute a
+        # deterministic id from text+metadata so we can deduplicate and do
+        # idempotent upserts downstream.
         base = (req.id or "") + "|" + req.text + "|" + meta_json
-        det_id = hashlib.sha256(base.encode("utf-8")).hexdigest()
+        if req.id:
+            det_id = req.id
+        else:
+            det_id = hashlib.sha256(base.encode("utf-8")).hexdigest()
 
         # Sequence/version: high-precision timestamp in milliseconds
         ingest_ts = int(time.time() * 1000)
