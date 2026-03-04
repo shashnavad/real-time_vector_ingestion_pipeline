@@ -3,6 +3,102 @@
 This file tracks the current implementation status of the MVP and what still
 needs to be done.
 
+## Overview
+
+1. What
+
+   A lightweight, streaming-first MVP that receives text documents via an
+   HTTP ingest API, computes embeddings, and keeps a vector database (Qdrant)
+   in sync with the source using a streaming pipeline. The project prefers
+   free/open-source components and provides safe local fallbacks for quick
+   iteration.
+
+2. Core Flow
+
+   The canonical flow is illustrated below. The ingestion API writes a small
+   metadata sidecar to a source registry (Redis) to enable CDC-style auditing
+   and then produces a canonical JSON message to a Kafka topic (`raw-documents`).
+
+   ASCII Architecture Diagram
+
+   ```text
+   +------------+     +------------+     +-----------+     +------------+
+   |  Producer  | --> | Ingest API | --> |  Kafka    | --> |  Spark     |
+   | (client)   |     | (FastAPI)  |     | (Redpanda)|     | Structured |
+   +------------+     +------------+     +-----------+     | Streaming  |
+          |                 |                |             +-----+------+
+          |                 |                |                   |
+          |                 |                |                   v
+          |                 |                |             +------------+
+          |                 |                |             |  Qdrant     |
+          |                 |                |             |  (Vector DB)|
+          |                 |                |             +------------+
+          |                 |                |                   ^
+          |                 |                |                   |
+          |                 |                |             +-----+------+
+          |                 |                |             |  Redis      |
+          |                 |                |             | (source     |
+          |                 |                |             |  registry,  |
+          |                 |                |             |  metrics)   |
+          |                 |                |             +------------+
+          |                 |                |
+          |                 |                +--> (RQ fallback worker)
+          |                 |                          (local in-memory fallback)
+          |                 v
+   (client can also query)--> [Query API] --> default_vector_store (Chroma / in-memory)
+   ```
+
+3. Critical Components
+
+   - FastAPI ingestion service (`app/main.py`) — produces canonical messages and
+     writes a Redis metadata sidecar for CDC.
+   - Kafka-compatible broker (Redpanda) — transport for raw-document stream.
+   - Spark Structured Streaming job (`app/streaming.py`) — batches messages,
+     computes embeddings, deduplicates by id/version, and upserts to Qdrant.
+   - Qdrant — production vector sink. Chroma / in-memory used as developer
+     fallback via `app/vector_store.py`.
+   - Embeddings (`app/embeddings.py`) — default: 768-d BERT-style sentence-transformers; fallback: deterministic 768-d hash vectors.
+   - Redis — source registry for CDC, and simple metrics storage for latency/counts.
+
+4. Key Decisions
+
+   - Streaming-first architecture (Kafka + Spark) to allow batching of
+     expensive embedding inference and independent scaling of ingestion vs
+     embedding compute.
+   - Deterministic producer ids when client does not provide one; respects
+     client-provided ids when present. Producer writes a version timestamp
+     so sinks can perform idempotent upserts.
+   - Use Redis as a lightweight source registry sidecar to enable auditing and
+     reconciliation without requiring a full upstream database.
+   - Keep local, dependency-light fallbacks (in-memory store, deterministic
+     embeddings) so contributors can run the project without large downloads.
+
+5. Failure Points to Monitor
+
+   - Kafka backlog / Redpanda availability: monitor topic lag and consumer
+     progress (Spark offsets). Backpressure is controlled via
+     `SPARK_MAX_OFFSETS_PER_TRIGGER` and `SPARK_PROCESSING_TIME`.
+   - Qdrant upsert failures: streaming job logs should surface client/API
+     errors; audit endpoint can detect missing or stale points.
+   - Redis availability: source registry and metrics rely on Redis; if
+     Redis is down auditing and metrics will be limited.
+   - Model availability: if `sentence-transformers` is not installed or the
+     chosen model fails to download, the deterministic fallback will be
+     active (good for dev but reduces semantic quality).
+
+6. Performance Profile
+
+   - Target: sub-200ms end-to-end for small payloads in low-load conditions when
+     the streaming job processes micro-batches frequently (e.g., 200ms
+     trigger). Realistic throughput and latency depend strongly on model
+     latency (embedding inference) and Spark batch size.
+   - Controls available:
+     - `SPARK_PROCESSING_TIME` (default `200ms`) — lower for lower tail latency,
+       higher for better throughput efficiency.
+     - `SPARK_MAX_OFFSETS_PER_TRIGGER` — limits per-trigger message volume to
+       control backpressure and inference batching sizes.
+
+
 Implemented:
 - Read and parsed the project checklist (`Real-Time Vector Ingestion Pipeline.md`).
 - Chosen free-tier-first stack (Python, FastAPI, sentence-transformers, Chroma/FAISS fallback).
