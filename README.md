@@ -153,3 +153,15 @@ Notes about the RQ fallback
 	not available. However the primary, recommended flow is stream-based using
 	Kafka + Spark + Qdrant so you can scale and batch embeddings independently of the
 	ingestion API.
+
+Source registry & auditing
+- When a document is ingested the service (if `REDIS_URL` is configured)
+	writes a small sidecar record in Redis (`source:registry` and `source:ids`) containing the
+	deterministic id and version. This lets the `/audit` endpoint sample source IDs
+	and verify that the sink (Qdrant or local store) contains the same version. See `/audit`.
+
+Notes about embeddings
+- The project now prefers a 768-dimensional BERT-style sentence-transformers
+	model (default `sentence-transformers/bert-base-nli-mean-tokens`). If that model
+	is not installed the code falls back to a deterministic 768-d hash->vector
+	generator so the project remains runnable without large downloads.

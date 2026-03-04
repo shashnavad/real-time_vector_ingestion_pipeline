@@ -99,9 +99,12 @@ def start_stream(kafka_bootstrap_servers: str = None, topic: str = "raw-document
                     client.recreate_collection(collection_name, vector_size=len(vectors[0]))
 
                 points = []
-                for _id, vec, meta in zip(ids, vectors, metadatas):
+                for _id, vec, meta, ver in zip(ids, vectors, metadatas, versions):
                     # use deterministic id provided by producer to allow idempotent upserts
-                    points.append(PointStruct(id=_id, vector=vec, payload=meta or {}))
+                    payload = dict(meta or {})
+                    # include producer version so auditors can verify the sink
+                    payload["_version"] = ver
+                    points.append(PointStruct(id=_id, vector=vec, payload=payload))
 
                 client.upsert(collection_name=collection_name, points=points)
 
@@ -132,11 +135,13 @@ def start_stream(kafka_bootstrap_servers: str = None, topic: str = "raw-document
                 # fall back to local vector store
                 pass
 
-        # Fallback: upsert to local store
+        # Fallback: upsert to local store (include version in metadata)
         from app.vector_store import default_vector_store
 
-        for _id, vec, meta in zip(ids, vectors, metadatas):
-            default_vector_store.upsert(_id, vec, meta)
+        for _id, vec, meta, ver in zip(ids, vectors, metadatas, versions):
+            sink_meta = dict(meta or {})
+            sink_meta["_version"] = ver
+            default_vector_store.upsert(_id, vec, sink_meta)
 
     # configure trigger interval for low-latency processing and a checkpoint
     processing_time = os.environ.get("SPARK_PROCESSING_TIME", "200ms")

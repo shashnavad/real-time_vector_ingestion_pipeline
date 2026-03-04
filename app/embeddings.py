@@ -9,7 +9,12 @@ import hashlib
 
 
 class Embeddings:
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+    def __init__(self, model_name: str = "sentence-transformers/bert-base-nli-mean-tokens"):
+        """Prefer a 768-dimensional BERT-style sentence-transformers model.
+
+        Falls back to a deterministic 768-d hash-based vector when the model
+        isn't available so the project remains runnable without large downloads.
+        """
         self.model_name = model_name
         self._model = None
         try:
@@ -17,7 +22,7 @@ class Embeddings:
 
             self._model = SentenceTransformer(model_name)
         except Exception:
-            # Fallback: no heavy deps available; use hashing-based vectors
+            # Fallback: no heavy deps available; we'll produce deterministic 768-d vectors
             self._model = None
 
     def encode(self, texts: List[str]) -> List[List[float]]:
@@ -31,9 +36,9 @@ class Embeddings:
             vectors = self._model.encode(texts, show_progress_bar=False)
             return [v.tolist() if hasattr(v, "tolist") else list(map(float, v)) for v in vectors]
 
-        # Fallback: deterministic hash-based vector of fixed small dimension
+        # Fallback: deterministic hash-based vector of fixed 768 dimensions
         out = []
-        dim = 128
+        dim = 768
         for t in texts:
             h = hashlib.sha256(t.encode("utf-8")).digest()
             # expand hash to dim floats by re-hashing

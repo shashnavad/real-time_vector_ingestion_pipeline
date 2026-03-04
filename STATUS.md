@@ -25,6 +25,13 @@ Implemented:
     compose environment; the streaming job will upsert vectors to Qdrant when
     `QDRANT_URL` is present (set to `http://qdrant:6333` by compose).
   - `Dockerfile`, `docker-compose.yml` for local durable setup (Redpanda + Redis + web + worker).
+  - Metadata sidecar and CDC support:
+    - `app/main.py` now writes a small source registry into Redis (`source:registry` and `source:ids`) when `REDIS_URL` is configured.
+    - This enables CDC-style auditing and reconciliation.
+  - Consistency auditor and dashboard:
+    - Added `/audit` endpoint to sample IDs from the source registry and verify the sink contains the expected `_version`.
+    - Added a lightweight `/dashboard` HTML page that polls `/metrics` for live ingestion latency and counts.
+  - Embeddings model: switched default to a 768-dimensional BERT-style sentence-transformers model (`sentence-transformers/bert-base-nli-mean-tokens`) and made the fallback deterministic generator produce 768-d vectors.
 - Tests and CI:
   - Unit tests under `tests/` cover embeddings, vector store, ingest and query flows.
   - GitHub Actions workflow `/.github/workflows/ci.yml` runs tests on push/PR. The latest CI run (after fixing the Python matrix) completed successfully: https://github.com/shashnavad/real-time_vector_ingestion_pipeline/actions/runs/22611192680

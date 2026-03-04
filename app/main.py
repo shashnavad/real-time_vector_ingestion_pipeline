@@ -52,6 +52,23 @@ def ingest(req: IngestRequest):
             "version": ingest_ts,
             "ingest_ts": ingest_ts,
         }
+        # Persist a small metadata sidecar into Redis (source registry) so we can
+        # later audit/verify the sink. This happens before producing to Kafka so
+        # the registry reflects the intended source state.
+        try:
+            redis_url = os.environ.get("REDIS_URL")
+            if redis_url:
+                import redis as _redis
+                r = _redis.from_url(redis_url)
+                # store JSON blob under a single hash for simplicity
+                try:
+                    r.hset("source:registry", det_id, json.dumps({"version": ingest_ts, "hash": hashlib.sha256(base.encode("utf-8")).hexdigest(), "original_id": req.id}))
+                    r.sadd("source:ids", det_id)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         prod_res = default_messenger.produce("raw-documents", payload)
 
         # If Kafka/RQ was used the produce call will return a non-dict (send result or job).
@@ -61,7 +78,11 @@ def ingest(req: IngestRequest):
         # Inline fallback: process synchronously (also record metrics if Redis available)
         vectors = default_embeddings.encode([req.text])
         vector = vectors[0]
-        default_vector_store.upsert(det_id, vector, req.metadata)
+        # Ensure we persist the version in the sink metadata so auditors can verify
+        sink_meta = dict(req.metadata or {})
+        sink_meta["_version"] = ingest_ts
+        sink_meta["_original_id"] = req.id
+        default_vector_store.upsert(det_id, vector, sink_meta)
 
         # record metric to Redis if configured
         try:
@@ -116,6 +137,130 @@ def metrics():
         return {"count": count, "avg_latency_ms": avg, "last_latency_ms": last_val}
     except Exception:
         return {"count": 0, "avg_latency_ms": None, "last_latency_ms": None}
+
+
+@app.get("/audit")
+def audit(sample_size: int = 10):
+    """Audit a random sample of source IDs and verify the sink has the expected version.
+
+    Returns a small report: total sampled, missing_in_sink, version_mismatches.
+    Requires `REDIS_URL` to be configured (the source registry).
+    """
+    try:
+        redis_url = os.environ.get("REDIS_URL")
+        if not redis_url:
+            raise HTTPException(status_code=400, detail="REDIS_URL not configured; audit requires a source registry")
+        import redis as _redis
+        r = _redis.from_url(redis_url)
+        # sample IDs from the set
+        ids = r.srandmember("source:ids", sample_size) or []
+        # decode bytes if necessary
+        ids = [i.decode("utf-8") if isinstance(i, (bytes, bytearray)) else i for i in ids]
+
+        missing = []
+        version_mismatch = []
+        checked = 0
+        qdrant_url = os.environ.get("QDRANT_URL")
+        collection = os.environ.get("QDRANT_COLLECTION", "documents")
+
+        for _id in ids:
+            checked += 1
+            reg = r.hget("source:registry", _id)
+            if not reg:
+                missing.append({"id": _id, "reason": "no-registry-entry"})
+                continue
+            try:
+                reg_obj = json.loads(reg)
+            except Exception:
+                reg_obj = None
+            expected_version = reg_obj.get("version") if reg_obj else None
+
+            found = None
+            # try Qdrant first if configured
+            if qdrant_url:
+                try:
+                    try:
+                        from qdrant_client import QdrantClient
+                        client = QdrantClient(url=qdrant_url)
+                        # try to retrieve point payload (method may vary by client version)
+                        try:
+                            point = client.get_point(collection_name=collection, id=_id)
+                            # client.get_point may return a dict with 'payload' or similar
+                            payload = None
+                            if isinstance(point, dict):
+                                payload = point.get("payload") or point.get("result") or None
+                            elif hasattr(point, "payload"):
+                                payload = getattr(point, "payload")
+                            if payload is not None:
+                                found = {"meta": payload}
+                        except Exception:
+                            # some client versions don't expose get_point; fall through to None
+                            found = None
+                    except Exception:
+                        found = None
+                except Exception:
+                    found = None
+
+            # fallback to local vector store check
+            if found is None:
+                try:
+                    res = default_vector_store.get(_id)
+                    if res is None:
+                        missing.append({"id": _id, "reason": "not-in-sink"})
+                        continue
+                    found = {"meta": res.get("metadata")}
+                except Exception:
+                    missing.append({"id": _id, "reason": "error-checking-sink"})
+                    continue
+
+            # compare version
+            sink_meta = found.get("meta") or {}
+            sink_version = sink_meta.get("_version")
+            if expected_version is None:
+                version_mismatch.append({"id": _id, "expected": expected_version, "found": sink_version})
+            else:
+                try:
+                    if int(sink_version or 0) != int(expected_version or 0):
+                        version_mismatch.append({"id": _id, "expected": expected_version, "found": sink_version})
+                except Exception:
+                    version_mismatch.append({"id": _id, "expected": expected_version, "found": sink_version})
+
+        return {"sampled": checked, "missing": missing, "version_mismatch": version_mismatch}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/dashboard")
+def dashboard():
+    """Return a tiny HTML dashboard that polls /metrics and shows basic values.
+
+    This is intentionally lightweight so it works in environments without a
+    frontend framework. It uses a tiny client-side fetch to update values.
+    """
+    html = """
+    <!doctype html>
+    <html>
+    <head><meta charset="utf-8"><title>Ingestion Dashboard</title></head>
+    <body>
+    <h2>Ingestion Metrics (live)</h2>
+    <div id="metrics">Loading...</div>
+    <script>
+    async function fetchMetrics(){
+      try{
+        const r = await fetch('/metrics');
+        const j = await r.json();
+        document.getElementById('metrics').innerText = JSON.stringify(j, null, 2);
+      }catch(e){ document.getElementById('metrics').innerText = 'error: '+e }
+    }
+    fetchMetrics(); setInterval(fetchMetrics, 2000);
+    </script>
+    </body>
+    </html>
+    """
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(content=html, status_code=200)
 
 
 class QueryRequest(BaseModel):
